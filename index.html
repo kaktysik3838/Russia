@@ -4,119 +4,269 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>P2P Чат-рулетка</title>
+    <!-- Подключаем Socket.IO для надежного обмена сигналами -->
+    <script src="/socket.io/socket.io.js"></script>
     <style>
-        body { font-family: sans-serif; background: #1a1a1a; color: #fff; text-align: center; padding: 20px; }
-        .video-container { display: flex; justify-content: center; gap: 20px; margin-top: 20px; flex-wrap: wrap; }
-        video { width: 100%; max-width: 400px; background: #000; border-radius: 8px; }
-        .controls { margin-top: 20px; }
-        button { padding: 10px 20px; font-size: 16px; margin: 5px; cursor: pointer; border-radius: 5px; border: none; }
-        #startBtn { background: #28a745; color: white; }
-        #unmuteBtn { background: #007bff; color: white; }
-        #status { margin: 20px; color: #ffc107; font-size: 18px; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+        }
+        .video-container {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-top: 30px;
+        }
+        .video-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+        }
+        video {
+            width: 100%;
+            max-width: 480px;
+            background-color: #000;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.5);
+            aspect-ratio: 4/3;
+            object-fit: cover;
+        }
+        h3 { margin-bottom: 10px; }
+        .controls {
+            margin-top: 30px;
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        #startBtn { background-color: #28a745; color: white; }
+        #startBtn:hover { background-color: #218838; }
+        #startBtn:disabled { background-color: #555; cursor: not-allowed; }
+        
+        #unmuteBtn { background-color: #007bff; color: white; display: none; }
+        #unmuteBtn:hover { background-color: #0069d9; }
+        
+        #status { margin-top: 20px; font-size: 18px; color: #ffc107; }
     </style>
 </head>
 <body>
 
-    <h1>P2P Видеочат</h1>
-    <div id="status">Нажмите «Войти в чат», чтобы начать</div>
+    <h1>Анонимный P2P Видеочат</h1>
+    <div id="status">Нажмите «Начать поиск», чтобы разрешить доступ к камере</div>
 
     <div class="video-container">
-        <div><h3>Вы</h3><video id="localVideo" autoplay playsinline muted></video></div>
-        <div><h3>Собеседник</h3><video id="remoteVideo" autoplay playsinline muted></video></div>
+        <div class="video-box">
+            <h3>Вы</h3>
+            <video id="localVideo" autoplay playsinline muted></video>
+        </div>
+        <div class="video-box">
+            <h3>Собеседник</h3>
+            <video id="remoteVideo" autoplay playsinline muted></video>
+            <!-- Кнопка появится, когда пойдет видео -->
+        </div>
     </div>
 
     <div class="controls">
-        <button id="startBtn">Войти в чат</button>
-        <button id="unmuteBtn" disabled>Включить звук собеседника</button>
+        <button id="startBtn">Начать поиск</button>
+        <button id="unmuteBtn">🔊 Включить звук собеседника</button>
     </div>
 
     <script>
+        const socket = io(); // Инициализация Socket.io
+
         const localVideo = document.getElementById('localVideo');
         const remoteVideo = document.getElementById('remoteVideo');
         const startBtn = document.getElementById('startBtn');
         const unmuteBtn = document.getElementById('unmuteBtn');
         const statusText = document.getElementById('status');
 
-        let localStream, peerConnection, socket;
-        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        let localStream = null;
+        let remoteStream = null;
+        let peerConnection = null;
+        let partnerId = null;
+        let isInitiator = false;
 
-        // Включение звука
+        // --- Продвинутые переменные из другого проекта ---
+        let iceCandidatesQueue = []; 
+        let isRemoteDescriptionSet = false;
+
+        // Сброс состояния перед новым поиском
+        function resetConnectionState() {
+            iceCandidatesQueue = [];
+            isRemoteDescriptionSet = false;
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            unmuteBtn.style.display = 'none';
+        }
+
+        // Получение TURN-серверов для обхода сложных NAT (из вашего скрипта)
+        async function getIceServers() {
+            try {
+                const response = await fetch("https://online-bar-mvp_onrender.metered.live/api/v1/turn/credentials?apiKey=df50d14c7b773052583c62eabb12517764e1");
+                return await response.json();
+            } catch (error) {
+                console.warn("Ошибка API Metered. Включаем дефолтные STUN.");
+                return [{ urls: "stun:stun.l.google.com:19302" }];
+            }
+        }
+
+        // Включение звука (обход автоплея)
         unmuteBtn.addEventListener('click', () => {
-            remoteVideo.muted = !remoteVideo.muted;
-            unmuteBtn.textContent = remoteVideo.muted ? 'Включить звук собеседника' : 'Звук включен 🔊';
+            remoteVideo.muted = false;
+            remoteVideo.play().then(() => {
+                unmuteBtn.style.backgroundColor = '#28a745';
+                unmuteBtn.textContent = 'Звук включен 🔊';
+            }).catch(err => console.error("Ошибка звука:", err));
         });
 
+        // Старт!
         startBtn.addEventListener('click', async () => {
             startBtn.disabled = true;
-            statusText.textContent = 'Разрешите доступ к камере...';
-            
+            statusText.textContent = 'Запрашиваем камеру...';
+            resetConnectionState();
+
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                 localVideo.srcObject = localStream;
                 
-                // Автоматически определяем адрес сервера (ws:// для локалки, wss:// для Render)
-                const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-                socket = new WebSocket(protocol + window.location.host);
+                statusText.textContent = 'Ожидание собеседника...';
                 
-                setupSignaling();
+                // Встаем в очередь на сервере
+                socket.emit('start-search');
             } catch (err) {
-                statusText.textContent = 'Ошибка доступа к камере.';
+                statusText.textContent = 'Ошибка: нет доступа к камере или микрофону.';
                 startBtn.disabled = false;
             }
         });
 
-        function setupSignaling() {
-            socket.onmessage = async (event) => {
-                const data = JSON.parse(event.data);
+        // Создаем WebRTC соединение
+        async function createPeerConnection(iceServers) {
+            peerConnection = new RTCPeerConnection({
+                iceServers: iceServers,
+                iceCandidatePoolSize: 10
+            });
 
-                if (data.type === 'status') {
-                    statusText.textContent = data.message;
+            // Добавляем наши треки
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            // Принимаем треки собеседника
+            peerConnection.ontrack = (event) => {
+                if (!remoteStream) {
+                    remoteStream = new MediaStream();
+                    remoteVideo.muted = true; // Запускаем без звука для iOS/Safari
+                    remoteVideo.srcObject = remoteStream;
                 }
+                event.streams[0].getTracks().forEach(track => {
+                    remoteStream.addTrack(track);
+                });
 
-                if (data.type === 'initiate') {
-                    createPeerConnection();
-                    const offer = await peerConnection.createOffer();
-                    await peerConnection.setLocalDescription(offer);
-                    socket.send(JSON.stringify({ type: 'offer', offer }));
+                remoteVideo.play().then(() => {
+                    unmuteBtn.style.display = 'block'; // Показываем кнопку включения звука
+                    statusText.textContent = 'Вы на связи с собеседником!';
+                }).catch(e => console.error(e));
+            };
+
+            // Отправляем ICE кандидатов
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate && partnerId) {
+                    socket.emit('signal', {
+                        to: partnerId,
+                        signalData: { candidate: event.candidate }
+                    });
                 }
+            };
+        }
 
-                if (data.type === 'offer') {
-                    createPeerConnection();
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-                    const answer = await peerConnection.createAnswer();
-                    await peerConnection.setLocalDescription(answer);
-                    socket.send(JSON.stringify({ type: 'answer', answer }));
+        // Применяем отложенные ICE кандидаты
+        async function processQueuedCandidates() {
+            for (const candidate of iceCandidatesQueue) {
+                try {
+                    await peerConnection.addIceCandidate(candidate);
+                } catch (e) {
+                    console.error("Ошибка добавления отложенного ICE-кандидата", e);
                 }
+            }
+            iceCandidatesQueue = [];
+        }
 
-                if (data.type === 'answer') {
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        // --- СОБЫТИЯ СИГНАЛЬНОГО СЕРВЕРА ---
+
+        socket.on('match-found', async (data) => {
+            partnerId = data.partnerId;
+            isInitiator = data.initiator;
+            statusText.textContent = 'Собеседник найден! Устанавливаем связь...';
+
+            const iceServers = await getIceServers();
+            await createPeerConnection(iceServers);
+
+            if (isInitiator) {
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                socket.emit('signal', {
+                    to: partnerId,
+                    signalData: { sdp: peerConnection.localDescription }
+                });
+            }
+        });
+
+        socket.on('signal', async ({ from, signalData }) => {
+            if (!peerConnection) return;
+
+            // Обрабатываем SDP (Offer / Answer)
+            if (signalData.sdp) {
+                try {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
+                    isRemoteDescriptionSet = true;
+                    
+                    // Как только RemoteDescription установлен, применяем накопившиеся ICE кандидаты
+                    await processQueuedCandidates();
+
+                    if (signalData.sdp.type === 'offer') {
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
+                        socket.emit('signal', {
+                            to: partnerId,
+                            signalData: { sdp: peerConnection.localDescription }
+                        });
+                    }
+                } catch (err) {
+                    console.error("Ошибка SDP", err);
                 }
+            } 
+            // Обрабатываем ICE кандидатов с умной очередью
+            else if (signalData.candidate) {
+                const iceCandidate = new RTCIceCandidate(signalData.candidate);
 
-                if (data.type === 'candidate') {
-                    if (peerConnection) {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                if (!isRemoteDescriptionSet) {
+                    iceCandidatesQueue.push(iceCandidate); // Складываем в очередь
+                } else {
+                    try {
+                        await peerConnection.addIceCandidate(iceCandidate); // Применяем сразу
+                    } catch (e) {
+                        console.error("Ошибка ICE", e);
                     }
                 }
-            };
-        }
+            }
+        });
 
-        function createPeerConnection() {
-            peerConnection = new RTCPeerConnection(configuration);
-            
-            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-
-            peerConnection.ontrack = (event) => {
-                remoteVideo.srcObject = event.streams[0];
-                unmuteBtn.disabled = false;
-                statusText.textContent = 'Вы на связи с собеседником!';
-            };
-
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    socket.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
-                }
-            };
-        }
     </script>
 </body>
 </html>
