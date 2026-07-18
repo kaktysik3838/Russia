@@ -1,53 +1,61 @@
 const express = require('express');
 const http = require('http');
-const WebSocket = require('ws');
+const { Server } = require('socket.io');
 const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const io = new Server(server);
 
-// Раздаем наш index.html
+// Отдаем твой красивый index.html
 app.use(express.static(path.join(__dirname)));
 
-let waitingPeer = null;
+// Переменная для хранения пользователя, который ищет пару
+let waitingSocket = null;
 
-wss.on('connection', (ws) => {
-    console.log('Кто-то подключился');
+io.on('connection', (socket) => {
+    console.log(`[+] Подключился клиент: ${socket.id}`);
 
-    // Очень простая логика рулетки: соединяем двоих
-    if (!waitingPeer) {
-        waitingPeer = ws;
-        ws.send(JSON.stringify({ type: 'status', message: 'Ожидаем собеседника...' }));
-    } else {
-        // Связываем их друг с другом
-        ws.peer = waitingPeer;
-        waitingPeer.peer = ws;
-        
-        // Говорим первому создавать звонок (Offer)
-        waitingPeer.send(JSON.stringify({ type: 'initiate' }));
-        ws.send(JSON.stringify({ type: 'status', message: 'Собеседник найден! Соединяем...' }));
-        
-        waitingPeer = null;
-    }
+    // Клиент нажал "Найти собутыльника"
+    socket.on('start-search', () => {
+        // Если кто-то уже ищет пару, и это не тот же самый человек
+        if (waitingSocket && waitingSocket.id !== socket.id) {
+            const partner = waitingSocket;
+            waitingSocket = null; // Очищаем комнату ожидания
 
-    // Пересылаем сообщения (сигналы WebRTC) напрямую между собеседниками
-    ws.on('message', (message) => {
-        const data = JSON.parse(message);
-        if (ws.peer && ws.peer.readyState === WebSocket.OPEN) {
-            ws.peer.send(JSON.stringify(data));
+            console.log(`[♥] Найдена пара: ${socket.id} и ${partner.id}`);
+
+            // Сообщаем обоим, что пара найдена.
+            // Текущий сокет будет инициатором (создает Offer)
+            socket.emit('match-found', { partnerId: partner.id, initiator: true });
+            partner.emit('match-found', { partnerId: socket.id, initiator: false });
+        } else {
+            // Если никого нет, ставим текущего в ожидание
+            waitingSocket = socket;
+            console.log(`[⏳] ${socket.id} ждет собутыльника...`);
         }
     });
 
-    ws.on('close', () => {
-        console.log('Кто-то отключился');
-        if (waitingPeer === ws) waitingPeer = null;
-        if (ws.peer) {
-            ws.peer.send(JSON.stringify({ type: 'status', message: 'Собеседник отключился.' }));
-            ws.peer.peer = null;
+    // Пересылка WebRTC сигналов (Offer, Answer, ICE) строго по ID собеседника
+    socket.on('signal', (data) => {
+        // data = { to: partnerId, signalData: { ... } }
+        io.to(data.to).emit('signal', {
+            from: socket.id,
+            signalData: data.signalData
+        });
+    });
+
+    socket.on('disconnect', () => {
+        console.log(`[-] Отключился клиент: ${socket.id}`);
+        // Если отключился тот, кто был в поиске — убираем его из очереди
+        if (waitingSocket && waitingSocket.id === socket.id) {
+            waitingSocket = null;
         }
+        // В идеале тут можно добавить уведомление собеседнику, что партнер сбежал
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Сервер запущен на порту ${PORT}`));
+server.listen(PORT, () => {
+    console.log(`🚀 Сервер на Socket.IO запущен на порту ${PORT}`);
+});
